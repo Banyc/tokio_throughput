@@ -1,32 +1,36 @@
 use std::{
+    num::NonZeroUsize,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use strict_num::NormalizedF64;
 
-pub fn gauge(alpha: NormalizedF64) -> (GaugeHandle, Gauge) {
+const PERIOD_DURATION: Duration = Duration::from_secs(1);
+const NUM_PERIODS: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(16) };
+const ALPHA: NormalizedF64 =
+    unsafe { NormalizedF64::new_unchecked(2. / (1 + NUM_PERIODS.get()) as f64) };
+
+pub fn gauge() -> (GaugeHandle, Gauge) {
     let bytes = Arc::new(AtomicU64::new(0));
-    let handle = GaugeHandle::new(alpha, Arc::clone(&bytes));
+    let handle = GaugeHandle::new(Arc::clone(&bytes));
     let gauge = Gauge::new(bytes);
     (handle, gauge)
 }
 
 #[derive(Debug)]
 pub struct GaugeHandle {
-    alpha: NormalizedF64,
     prev: Option<Instant>,
     thruput: f64,
     bytes: Arc<AtomicU64>,
     total_bytes: u64,
 }
 impl GaugeHandle {
-    fn new(alpha: NormalizedF64, bytes: Arc<AtomicU64>) -> Self {
+    fn new(bytes: Arc<AtomicU64>) -> Self {
         Self {
-            alpha,
             prev: None,
             thruput: 0.0,
             bytes,
@@ -34,17 +38,27 @@ impl GaugeHandle {
         }
     }
 
+    /// Update `thruput` using EMA and `total_bytes` using summation.
     pub fn update(&mut self, now: Instant) {
-        let d = now.duration_since(self.prev.unwrap_or(now));
-        self.prev = Some(now);
-        let d = d.as_secs_f64();
-        if d == 0.0 {
+        let d = now.duration_since(*self.prev.get_or_insert(now));
+        if d < PERIOD_DURATION {
             return;
         }
+
+        self.prev = Some(now);
         let bytes = self.bytes.swap(0, Ordering::Relaxed);
         self.total_bytes += bytes;
-        let thruput = bytes as f64 / d;
-        self.thruput = self.alpha.get() * thruput + (1. - self.alpha.get()) * self.thruput;
+
+        // Update `thruput`
+        let thruput = bytes as f64 / d.as_secs_f64();
+        if d > PERIOD_DURATION.mul_f64(NUM_PERIODS.get() as f64) {
+            self.thruput = thruput;
+            return;
+        }
+        let periods = (d.as_secs_f64() / PERIOD_DURATION.as_secs_f64()) as usize;
+        for _ in 0..periods {
+            self.thruput = ALPHA.get() * thruput + (1. - ALPHA.get()) * self.thruput;
+        }
     }
 
     pub fn thruput(&self) -> f64 {
