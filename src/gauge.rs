@@ -83,3 +83,22 @@ impl Gauge {
         self.bytes.fetch_add(bytes, Ordering::Relaxed);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_precision() {
+        let (mut handle, gauge) = gauge();
+        const N: usize = 2 << 10;
+        const BYTES: u64 = 2 << 10;
+        let mut now = Instant::now();
+        for _ in 0..N {
+            gauge.update(BYTES);
+            handle.update(now);
+            now += Duration::from_secs(1);
+        }
+        assert!((handle.thruput() - BYTES as f64).abs() < 0.1);
+    }
+}
